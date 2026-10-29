@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openmods.nexus/openmods.schema.json",
+  "openmods": 1,
+  "name": "Heaven or Hell",
+  "summary": "Your hits kill only right after a timed parry or dodge; every other hit deals 1 damage. Enemies kill you in one hit.",
+  "games": ["phantom-blade-zero"],
+  "tags": ["gameplay"],
+  "requires": ["UE4SS (tested with v3.0.1-1183-gcdbc0b66)"],
+  "gameVersions": ["Release (Steam build 26266538)"],
+  "cover": "docs/cover.png"
+}
