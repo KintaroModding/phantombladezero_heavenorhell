@@ -2,13 +2,13 @@
   "name": "Heaven or Hell",
   "folder": "phantombladezero_heavenorhell",
   "author": "Kintaro",
-  "version": "1.6",
+  "version": "1.7",
   "description": "Your hits kill only right after a timed parry or a dodge through an attack; every other hit does 1 damage, and enemies kill you in one hit.",
   "kind": "ue4ss",
   "game": "phantombladezero",
   "gameFolder": "PBZ",
   "win64Path": "platform\\steam",
-  "gameVersion": "CL-301524_JKS-17219",
+  "gameVersion": "CL-302256_JKS-17280",
   "engine": "UE5_7",
-  "ue4ss": "v3.0.1-1183-gcdbc0b66"
+  "ue4ss": "v4.0.0"
 }

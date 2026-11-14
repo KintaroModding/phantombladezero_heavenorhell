@@ -3,7 +3,8 @@
 Your hits kill only right after a timed parry or a dodge through an attack; every other hit does 1 damage, and enemies kill you in one hit.
 
 A [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) Lua mod for Phantom Blade Zero (Unreal Engine 5.7), made with
-game version `CL-301524_JKS-17219` and UE4SS `v3.0.1-1183-gcdbc0b66`. This README is for developers; what the mod does and
+game version `CL-301524_JKS-17219` and UE4SS `v3.0.1-1183-gcdbc0b66`; 1.7 for game version `CL-302256_JKS-17280`
+(Steam build 26367565) and UE4SS `v4.0.0`. This README is for developers; what the mod does and
 how to install it are in [openmods.md](openmods.md), the mod page on [openmods](https://openmods.nexus).
 
 ## How it works
@@ -43,6 +44,13 @@ how to install it are in [openmods.md](openmods.md), the mod page on [openmods](
   `Current Frame` or `Target`) that logs each change; the damage attributes of both, once per class; and the hit,
   damage and death events sent through `AbilitySystemBlueprintLibrary:SendGameplayEventToActor` (Blueprints and the
   game's scripts; C++ does not go through it).
+- **1.7:** every loop runs on the game thread (`LoopInGameThreadWithDelay`: the hook check every 2 s, the attributes
+  every 50 ms, `config.lua` every 5 s; the older `LoopAsync` ran its callback on a second thread beside the hooks,
+  the pattern of Witch Time 1.7's crash; it stays only as a fallback for a UE4SS without the game-thread loops).
+  `config.lua` is read live; a broken file keeps the last settings. The script remembers, per attribute it writes,
+  the game's own value (taken again whenever the game recalculated it) and writes it back when a setting turns
+  that part off (`Enable`, `EnemyOneShot`, or `NormalDamage` at or above the base `Attack`, also right after a
+  window; 1.6 left the kill `Attack` there until the game recalculated it), while the value is still the mod's.
 - **Classes:** the script looks for the classes at start, after each map load and every 2 seconds while one is
   missing, and sets the hooks once a class is there (again after it was unloaded).
 

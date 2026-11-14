@@ -19,16 +19,23 @@
 -- UGA_DamageModificationBase:OnDamagePreTakeEventReceived never fired in the tests of 1.0 and 1.1 (the game calls
 -- them from C++); they stay as log hooks.
 --
--- Settings: the player edits Scripts\config.lua; DEFAULTS holds every setting with its default. A player (or a mod
--- manager) keeps their config.lua across updates, so a new main.lua can meet an older file: a setting that the file
--- lacks, or has with another type, keeps its default, and the log says so. Read a setting only from Settings, never
--- as `config.X or default`: for a true/false setting, `false or true` is true.
+-- Settings: the player edits Scripts\config.lua. The mod reads it at start and again every CONFIG_INTERVAL_MS (1.7),
+-- so a change shows without a restart; a broken or half-saved file keeps the last settings. A part that a change turns
+-- off gives the player's attribute values back (GiveBack). DEFAULTS holds every setting with its default. A player
+-- (or a mod manager) keeps their config.lua across updates, so a new main.lua can meet an older file: a setting that
+-- the file lacks, or has with another type, keeps its default, and the log says so. Read a setting only from
+-- Settings, never as `config.X or default`: for a true/false setting, `false or true` is true.
+--
+-- 1.7: every loop runs on the game thread (LoopInGameThreadWithDelay; the older LoopAsync ran its callback on a second
+-- thread beside the hooks: Witch Time's crash lesson of 2026-10-31), config.lua is read live, and the
+-- values the mod writes are given back when a setting turns their part off.
 
 local UEHelpers = require("UEHelpers")
 
 local MOD_NAME = "Heaven or Hell"
-local VERSION = "1.6"
+local VERSION = "1.7"
 local CHECK_INTERVAL_MS = 2000
+local CONFIG_INTERVAL_MS = 5000
 -- Log at most this many error lines in total.
 local MAX_ERROR_LOGS = 5
 -- Log at most this many LogHits lines per game start.
@@ -85,29 +92,36 @@ local function LogError(message)
     end
 end
 
--- DEFAULTS, with the values of Scripts\config.lua over them.
-local function ReadSettings()
+local function CopyDefaults()
     local settings = {}
     for name, value in pairs(DEFAULTS) do
         settings[name] = value
     end
-    local ok, config = pcall(require, "config")
+    return settings
+end
+
+-- Lua's line number and reason, without the chunk name.
+local function Reason(message)
+    message = tostring(message)
+    local line, reason = message:match("config%.lua:(%d+): ([^\n]*)")
+    return line and ("line " .. line .. ": " .. reason) or (message:gsub("%s*\n%s*", " "))
+end
+
+-- DEFAULTS with the values of config.lua's text over them; nil and the reason when the text is not a usable file
+-- (1.7: from the file's text, so it can be read again; require would keep the first result).
+local function ParseConfig(text)
+    local chunk, problem = load(text, "=config.lua", "t", {})
+    if not chunk then
+        return nil, "config.lua not read (" .. Reason(problem) .. ")"
+    end
+    local ok, config = pcall(chunk)
     if not ok then
-        local message = tostring(config)
-        if message:find("module 'config' not found", 1, true) then
-            Log("No config.lua; every setting uses its default.")
-        else
-            -- A broken file: Lua's line number and reason, without the long file path.
-            local line, reason = message:match("config%.lua:(%d+): ([^\n]*)")
-            local detail = line and ("line " .. line .. ": " .. reason) or message:gsub("%s*\n%s*", " ")
-            Log("config.lua not read (" .. detail .. "); every setting uses its default.")
-        end
-        return settings
+        return nil, "config.lua not read (" .. Reason(config) .. ")"
     end
     if type(config) ~= "table" then
-        Log("config.lua does not return a table; every setting uses its default.")
-        return settings
+        return nil, "config.lua does not return a table"
     end
+    local settings = CopyDefaults()
     for name, value in pairs(config) do
         local default = DEFAULTS[name]
         if default == nil then
@@ -117,7 +131,7 @@ local function ReadSettings()
                 tostring(default)))
         else
             local limit = LIMITS[name]
-            if limit and (value < limit[1] or value > limit[2]) then
+            if limit and (value ~= value or value < limit[1] or value > limit[2]) then
                 Log(string.format("config.lua: %s must be from %s to %s; the default %s is used.", name,
                     tostring(limit[1]), tostring(limit[2]), tostring(default)))
             else
@@ -142,13 +156,63 @@ local function Describe(settings)
     return table.concat(parts, ", ")
 end
 
-Log(VERSION .. " loaded.")
-local Settings = ReadSettings()
-Log("Settings: " .. Describe(Settings))
+local Settings = {}
+local configPath = nil
+-- The text of the last read; false: no file at the last read; nil: not read yet.
+local configText = nil
 
+-- Reads config.lua when its text changed since the last read. At start, a missing or broken file means the defaults;
+-- later, a broken file keeps the last settings (a half-saved file), and a missing one means the defaults.
+local function ReadConfig()
+    local atStart = configText == nil
+    configPath = configPath or package.searchpath("config", package.path)
+    local text = false
+    if configPath then
+        local file = io.open(configPath, "rb")
+        if file then
+            text = file:read("a") or false
+            file:close()
+        end
+    end
+    if text == configText then
+        return
+    end
+    configText = text
+    local settings, problem
+    if text == false then
+        settings, problem = CopyDefaults(), nil
+        Log("No config.lua; every setting uses its default.")
+    else
+        settings, problem = ParseConfig(text)
+    end
+    if not settings then
+        if atStart then
+            Log(problem .. "; every setting uses its default.")
+            settings = CopyDefaults()
+        else
+            Log(problem .. "; the last settings stay.")
+            return
+        end
+    end
+    local line = Describe(settings)
+    if atStart or line ~= Describe(Settings) then
+        Log("Settings: " .. line)
+    end
+    if not atStart and settings.Enable ~= Settings.Enable then
+        Log(settings.Enable and "Enable = true: the mod works again." or
+            "Enable = false: the game's values are back; the mod waits until it is true.")
+    end
+    Settings = settings
+end
+
+Log(VERSION .. " loaded.")
+Settings = CopyDefaults()
+local read, readProblem = pcall(ReadConfig)
+if not read then
+    LogError("Error while reading config.lua: " .. tostring(readProblem))
+end
 if not Settings.Enable then
-    Log("Enable = false in config.lua: the mod does nothing.")
-    return
+    Log("Enable = false in config.lua: the mod does nothing until it is true.")
 end
 
 -- Real time in seconds (wall time on Windows).
@@ -157,7 +221,7 @@ local function Now()
 end
 
 local function LogHit(message)
-    if not Settings.LogHits then
+    if not (Settings.Enable and Settings.LogHits) then
         return
     end
     hitLogs = hitLogs + 1
@@ -280,18 +344,69 @@ local function AttributeValues(character, name)
     return nil, nil
 end
 
+local function Near(a, b)
+    return math.abs(a - b) <= math.max(0.000001, math.abs(b) * 0.000001)
+end
+
+-- The attributes the mod wrote on the player's pawn (1.7): for each, the value it wrote last (mine) and the game's own
+-- value (game), taken at the first write and again whenever the game recalculated the value since the mod's last
+-- write. A new pawn (a map load, a respawn) starts a new list: its values are the game's.
+local written = { pawn = nil, values = {} }
+
+local function WrittenOf(character)
+    local address = character:GetAddress()
+    if written.pawn ~= address then
+        written.pawn, written.values = address, {}
+    end
+    return written.values
+end
+
 -- Writes CurrentValue when it differs; the old value, or nil when nothing was written.
 local function WriteAttribute(character, name, value)
     local ok, old = pcall(function()
+        local values = WrittenOf(character)
         local data = character.AttributeSetBase[name]
         local current = data.CurrentValue
-        if math.abs(current - value) <= math.max(0.000001, math.abs(value) * 0.000001) then
+        local entry = values[name]
+        if entry == nil or not Near(current, entry.mine) then
+            entry = { mine = current, game = current }
+            values[name] = entry
+        end
+        if Near(current, value) then
             return nil
         end
         data.CurrentValue = value
+        entry.mine = value
         return current
     end)
     return ok and old or nil
+end
+
+-- Gives an attribute back (1.7): the game's own value, while the value is still the one the mod wrote (else the game
+-- has recalculated it already). Nothing when the mod has not written it.
+local function GiveBack(character, name)
+    pcall(function()
+        local values = WrittenOf(character)
+        local entry = values[name]
+        if entry == nil then
+            return
+        end
+        values[name] = nil
+        local data = character.AttributeSetBase[name]
+        if Near(data.CurrentValue, entry.mine) then
+            data.CurrentValue = entry.game
+        end
+    end)
+end
+
+local function GiveBackAll(character)
+    local names = {}
+    for name in pairs(WrittenOf(character)) do
+        names[#names + 1] = name
+    end
+    for _, name in ipairs(names) do
+        GiveBack(character, name)
+    end
 end
 
 local windowWasOpen = false
@@ -299,6 +414,12 @@ local windowWasOpen = false
 local function KeepAttributes()
     local pawn = ControlledPawn()
     if pawn == nil then
+        return
+    end
+    if not Settings.Enable then
+        -- 1.7: switched off: no window, and the game's own values back.
+        windowUntil, redUntil, windowWasOpen = 0, 0, false
+        GiveBackAll(pawn)
         return
     end
     if redUntil > 0 and Now() >= redUntil then
@@ -330,6 +451,9 @@ local function KeepAttributes()
                 end
             end
         end
+    else
+        -- 1.7: NormalDamage at or above the base Attack: the game's own Attack, also right after a window.
+        GiveBack(pawn, "Attack")
     end
     if Settings.EnemyOneShot then
         for _, damageType in ipairs(HEALTH_TYPES) do
@@ -342,6 +466,11 @@ local function KeepAttributes()
                         math.max(base, 0.001) * ONE_SHOT_FACTOR))
                 end
             end
+        end
+    else
+        -- 1.7: switched off while the game runs: the damage taken back to the game's.
+        for _, damageType in ipairs(HEALTH_TYPES) do
+            GiveBack(pawn, "TakenVulnerabilityMultiplier_" .. damageType)
         end
     end
 end
@@ -367,6 +496,9 @@ local lastTrigger = nil
 local lastTriggerKind = ""
 
 local function OnTrigger(kind)
+    if not Settings.Enable then
+        return -- 1.7: switched off
+    end
     local now = Now()
     if lastTrigger ~= nil and now - lastTrigger < 0.05 and lastTriggerKind == kind then
         return
@@ -523,7 +655,9 @@ local HOOK_GROUPS = {
                     local ability = Get(context)
                     OnTrigger("red-light perfect dodge (" .. ClassName(ability) .. ")")
                     -- The window stays open until the ability ends (its counter attack comes late).
-                    redUntil = Now() + RED_MAX_SECONDS
+                    if Settings.Enable then -- 1.7: switched off: no window
+                        redUntil = Now() + RED_MAX_SECONDS
+                    end
                     -- The attacker: the ability's "Current Frame" (FDeflectResultData) or its "Target".
                     local ok, enemy = pcall(function()
                         return ability["Current Frame"].SourceAvatar
@@ -688,30 +822,50 @@ if not started then
     LogError("Error at start: " .. tostring(problem))
 end
 
-LoopAsync(CHECK_INTERVAL_MS, function()
-    ExecuteInGameThread(function()
-        local ok, err = pcall(TryHooks)
-        if not ok then
-            LogError("Error: " .. tostring(err))
-        end
-    end)
-    -- false keeps the loop running.
-    return false
-end)
+local function CheckStep()
+    local ok, err = pcall(TryHooks)
+    if not ok then
+        LogError("Error: " .. tostring(err))
+    end
+end
 
--- The fast loop: the attribute values (always) and the health watch (LogHits).
-LoopAsync(WATCH_MS, function()
-    ExecuteInGameThread(function()
-        local ok, err = pcall(KeepAttributes)
+-- The fast step: the attribute values (always, while Enable) and the health watch (LogHits).
+local function WatchStep()
+    local ok, err = pcall(KeepAttributes)
+    if not ok then
+        LogError("Error in the damage change: " .. tostring(err))
+    end
+    if Settings.Enable and Settings.LogHits then
+        ok, err = pcall(CheckHealth)
         if not ok then
-            LogError("Error in the damage change: " .. tostring(err))
+            LogError("Error in the health watch: " .. tostring(err))
         end
-        if Settings.LogHits then
-            ok, err = pcall(CheckHealth)
-            if not ok then
-                LogError("Error in the health watch: " .. tostring(err))
-            end
-        end
-    end)
-    return false
-end)
+    end
+end
+
+local function ConfigStep()
+    local ok, err = pcall(ReadConfig)
+    if not ok then
+        LogError("Error while reading config.lua: " .. tostring(err))
+    end
+end
+
+-- 1.7: every loop runs on the game thread (UE4SS's Delayed Action API): no Lua on a second thread beside the hooks
+-- (Witch Time's crash lesson). A UE4SS without it gets the old LoopAsync loops, and the log says so.
+if type(LoopInGameThreadWithDelay) == "function" then
+    LoopInGameThreadWithDelay(CHECK_INTERVAL_MS, CheckStep)
+    LoopInGameThreadWithDelay(WATCH_MS, WatchStep)
+    LoopInGameThreadWithDelay(CONFIG_INTERVAL_MS, ConfigStep)
+else
+    Log("This UE4SS has no game-thread loops (LoopInGameThreadWithDelay): the older LoopAsync is used; a newer UE4SS "
+        .. "is safer.")
+    local loops = { { CHECK_INTERVAL_MS, CheckStep }, { WATCH_MS, WatchStep }, { CONFIG_INTERVAL_MS, ConfigStep } }
+    for _, loop in ipairs(loops) do
+        local step = loop[2]
+        LoopAsync(loop[1], function()
+            ExecuteInGameThread(step)
+            -- false keeps the loop running.
+            return false
+        end)
+    end
+end

@@ -1,6 +1,7 @@
 """Offline test of Scripts/main.lua with lupa (Lua 5.4) and small mocks of UE4SS and the game.
 
-The mocks stand in for the UE4SS functions that the script uses (LoopAsync, RegisterHook, RegisterLoadMapPostHook,
+The mocks stand in for the UE4SS functions that the script uses (LoopInGameThreadWithDelay, LoopAsync, RegisterHook,
+RegisterLoadMapPostHook,
 StaticFindObject, UEHelpers) and for the game: a clock (os.clock), the player controller and pawn, characters with an
 AttributeSetBase, and the classes that the game loads later. The checks fire the hooked functions like the game does
 and move the clock. The mod writes the player's attribute values (CurrentValue) directly; the checks read them and
@@ -10,7 +11,8 @@ The settings checks run main.lua with the shipped Scripts/config.lua and with th
 none, an empty or older one, a broken one, one without a table, one with values of the wrong type, one with a value
 out of range, one with a setting the mod does not know, and one with Enable = false. main.lua must start without an
 error in each case, and a setting that the file does not give must keep its default. The shipped config.lua must hold
-exactly the defaults of main.lua.
+exactly the defaults of main.lua. Since 1.7 config.lua is read live: the checks change the file while main.lua runs and
+check that a part turned off gives the player's values back.
 
 Usage:
     python tests/test_main.py        (needs lupa: python -m pip install lupa)
@@ -46,7 +48,7 @@ SEND = LIBRARY + ":SendGameplayEventToActor"
 ALL_HOOKS = sorted([EVADE_EVENT, EVADE, RED_TRIGGER, RED_END, PARRY_IMPACT, ON_DAMAGE, TASK + ":OnDamageReceived",
                     MODIFICATION + ":OnDamagePreTakeEventReceived", SEND])
 ALL_CLASSES = "{" + ", ".join(f"'{path}'" for path in [DODGE, RED, PARRY, CHARACTER, TASK, MODIFICATION, LIBRARY]) + "}"
-TIMERS = 2
+TIMERS = 3
 
 MOCKS = r"""
 LOG = {}
@@ -107,7 +109,11 @@ MAP_HOOKS = {}
 function RegisterLoadMapPostHook(callback) MAP_HOOKS[#MAP_HOOKS + 1] = callback end
 
 LOOPS = {}
-function LoopAsync(ms, callback) LOOPS[#LOOPS + 1] = callback end
+LOOP_MS = {}
+ASYNC = 0
+function LoopInGameThreadWithDelay(ms, callback) LOOPS[#LOOPS + 1] = callback LOOP_MS[#LOOP_MS + 1] = ms end
+-- The older loop (the fallback without LoopInGameThreadWithDelay): its callback hands the work to ExecuteInGameThread.
+function LoopAsync(ms, callback) ASYNC = ASYNC + 1 LOOPS[#LOOPS + 1] = callback LOOP_MS[#LOOP_MS + 1] = ms end
 function ExecuteInGameThread(callback) callback() end
 
 local function Invalid() return OBJECT({ valid = false }) end
@@ -166,6 +172,7 @@ PLAYER_CONFIGS = [
     ("a broken config.lua", "return {\n    Enable =\n", "config.lua not read"),
     ("a config.lua without a table", "-- nothing here\n", "does not return a table"),
     ("a config.lua with wrong types", "wrong types", "must be a"),
+    ("a config.lua with a value that is not a number", "return { WindowMs = 0/0 }\n", "WindowMs must be from"),
     ("a config.lua with a value out of range", "return { WindowMs = 10 }\n", "WindowMs must be from"),
     ("a config.lua with an unknown setting", "return { NoSuchSetting = 1 }\n", "unknown setting NoSuchSetting"),
 ]
@@ -175,11 +182,14 @@ def lua_path(path: Path) -> str:
     return "[[" + path.as_posix() + "]]"
 
 
-def run(config_folder: Path):
-    """Runs main.lua with require("config") reading config.lua in config_folder, and its timer three times. A Lua
-    error that stops main.lua becomes an "Error" line in the log, so the checks fail instead of the test."""
+def run(config_folder: Path, before: str = ""):
+    """Runs main.lua with config.lua in config_folder (found through package.path), and its timers three times. Lua
+    code in before runs after the mocks (to take a UE4SS function away). A Lua error that stops main.lua becomes an
+    "Error" line in the log, so the checks fail instead of the test."""
     lua = lua54.LuaRuntime(unpack_returned_tuples=True)
     lua.execute(MOCKS)
+    if before:
+        lua.execute(before)
     lua.execute(f'package.path = {lua_path(config_folder)} .. "/?.lua"; package.cpath = ""')
     g = lua.globals()
     try:
@@ -214,7 +224,8 @@ def main() -> None:
     lua, g, log = run(CONFIG.parent)
     for line in log:
         print("      log: " + line)
-    check(len(g.LOOPS) == TIMERS, f"{TIMERS} LoopAsync timers (with LogHits: the health watch)")
+    check(len(g.LOOPS) == TIMERS and g.ASYNC == 0 and lua.eval("table.concat(LOOP_MS, ',')") == "2000,50,5000",
+          "three game-thread loops (hooks 2 s, attributes 50 ms, config.lua 5 s), no LoopAsync")
     check(len(g.MAP_HOOKS) == 1, "one map load hook")
     check(any(f"{version} loaded." in line for line in log), f"load line with the version {version} of mod.json")
     check(not any("Error" in line for line in log), "no error line after three timer runs")
@@ -265,9 +276,13 @@ def main() -> None:
                 for line in log2:
                     print("      log: " + line)
 
-        _, g2, log2 = run(folders["Enable = false"])
-        check(len(g2.LOOPS) == 0 and len(g2.HOOKS) == 0 and "Enable=false" in (settings_line(log2) or ""),
-              "Enable = false: no timer, no hook, the settings line shows Enable=false")
+        lua2, g2, log2 = run(folders["Enable = false"])
+        lua2.execute(f"LOAD_CLASSES({ALL_CLASSES}) TICK() CLOCK = 10 CALL('{EVADE}', 'GA_Hun_AdvancedDash_Tang_C', ENEMY, 0, true) TICK()")
+        check(len(g2.LOOPS) == TIMERS and "Enable=false" in (settings_line(log2) or "")
+              and any("does nothing until it is true" in line for line in log2)
+              and g2.PAWN.AttributeSetBase.Attack.CurrentValue == 100
+              and g2.PAWN.AttributeSetBase.TakenVulnerabilityMultiplier_Physical.CurrentValue == 1,
+              "Enable = false at start (1.7): the loops run for the live settings, a dodge writes nothing, the values stay the game's")
 
         # The hooks, set when their classes are loaded; the hit checks need LogHits (off in the shipped file).
         lua, g, _ = run(folders["LogHits on"])
@@ -419,6 +434,71 @@ def main() -> None:
         lua7, g7, _ = run(folders["NormalDamage high"])
         check(g7.PAWN.AttributeSetBase.Attack.CurrentValue == 100,
               "NormalDamage at or above the base Attack: Attack stays the game's outside the window")
+
+        # 1.7: config.lua read live; a part turned off gives the player's values back.
+        live = Path(temp) / "live"
+        live.mkdir()
+        cfg = live / "config.lua"
+        cfg.write_text(CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
+        lual, gl, _ = run(live)
+        attrs = gl.PAWN.AttributeSetBase
+        lual.execute(f"LOAD_CLASSES({ALL_CLASSES}) TICK()")
+
+        def set_config(text):
+            """Writes config.lua; two timer runs: the config step reads it, the next fast step acts on it."""
+            cfg.write_text(text, encoding="utf-8")
+            mark = len(gl.LOG)
+            lual.execute("TICK() TICK()")
+            return new_lines(gl, mark)
+
+        lines = set_config("return { EnemyOneShot = false }\n")
+        check(any("Settings: " in line and "EnemyOneShot=false" in line for line in lines)
+              and attrs.TakenVulnerabilityMultiplier_Physical.CurrentValue == 1
+              and attrs.TakenVulnerabilityMultiplier_PhysicalSharp.CurrentValue == 1
+              and abs(attrs.Attack.CurrentValue - 1) < 1e-9,
+              "live: EnemyOneShot turned off gives the damage taken back (1); a new settings line; Attack stays 1")
+        lual.execute("PAWN.AttributeSetBase.Attack.CurrentValue = 120 TICK()")
+        lines = set_config("return { Enable = false }\n")
+        check(attrs.Attack.CurrentValue == 120 and any("the game's values are back" in line for line in lines),
+              "live: Enable turned off gives Attack back, as the game last set it (a buff: 120, not the base 100)")
+        lual.execute(f"CLOCK = 100 CALL('{EVADE}', 'GA_Hun_AdvancedDash_Tang_C', ENEMY, 0, true)")
+        dodged = attrs.Attack.CurrentValue
+        lual.execute("TICK()")
+        check(dodged == 120 and attrs.Attack.CurrentValue == 120, "live: while switched off a dodge writes nothing")
+        lines = set_config("return {}\n")
+        check(abs(attrs.Attack.CurrentValue - 1) < 1e-9 and attrs.TakenVulnerabilityMultiplier_Physical.CurrentValue == 1000
+              and any("works again" in line for line in lines), "live: Enable back on writes the values again")
+        cfg.write_text("return { EnemyOneShot = false }\n", encoding="utf-8")
+        lual.execute("TICK() PAWN.AttributeSetBase.TakenVulnerabilityMultiplier_Physical.CurrentValue = 3 TICK()")
+        check(attrs.TakenVulnerabilityMultiplier_Physical.CurrentValue == 3
+              and attrs.TakenVulnerabilityMultiplier_PhysicalSharp.CurrentValue == 1,
+              "live: a value the game recalculated after the mod's last write stays as the game set it")
+        set_config("return { NormalDamage = 100 }\n")
+        before_window = attrs.Attack.CurrentValue
+        lual.execute(f"CLOCK = 200 CALL('{EVADE}', 'GA_Hun_AdvancedDash_Tang_C', ENEMY, 0, true) TICK()")
+        in_window = attrs.Attack.CurrentValue
+        lual.execute("CLOCK = 202 TICK()")
+        check(in_window == 10000000 and attrs.Attack.CurrentValue == before_window and before_window != 10000000,
+              "NormalDamage at or above the base Attack: after a window Attack goes back to the game's (1.6 kept the kill)")
+        lines = set_config("return {\n    Enable =\n")
+        check(any("the last settings stay" in line for line in lines) and not any("Settings: " in line for line in lines),
+              "live: a broken config.lua keeps the last settings")
+        set_config("return {}\n")
+        lual.execute("NEWPAWN = CHARACTER('BP_Renewal_Hun_Young_C', 850, 850) "
+                     "NEWPAWN.AttributeSetBase.Attack = { CurrentValue = 100, BaseValue = 100 } "
+                     "CONTROLLER.Pawn = NEWPAWN TICK()")
+        newattrs = gl.NEWPAWN.AttributeSetBase
+        written_new = abs(newattrs.Attack.CurrentValue - 1) < 1e-9
+        set_config("return { Enable = false }\n")
+        check(written_new and newattrs.Attack.CurrentValue == 100 and newattrs.TakenVulnerabilityMultiplier_Physical.CurrentValue == 1,
+              "a new pawn (respawn): its own values are written and given back, not the old pawn's")
+        check(not any("Error" in gl.LOG[i] for i in range(1, len(gl.LOG) + 1)), "no error line in the live run")
+
+        # 1.7: a UE4SS without the game-thread loops gets the older LoopAsync loops, and the log says so.
+        luaf, gf, logf = run(CONFIG.parent, before="LoopInGameThreadWithDelay = nil")
+        check(gf.ASYNC == TIMERS and any("the older LoopAsync is used" in line for line in logf)
+              and abs(gf.PAWN.AttributeSetBase.Attack.CurrentValue - 1) < 1e-9,
+              "without LoopInGameThreadWithDelay: three LoopAsync loops, one log line, the mod works")
 
         # LogHits off: no hit lines.
         lua4, g4, _ = run(folders["LogHits off"])

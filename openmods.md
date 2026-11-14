@@ -43,8 +43,10 @@ Nothing to do: parry at the right moment or dodge through an attack, then strike
 ## Settings
 
 The settings are in `platform\steam\ue4ss\Mods\phantombladezero_heavenorhell\Scripts\config.lua`. Open it with a
-text editor, change a value, save, and start the game again. `UE4SS.log` shows the settings in use in the line
-`[Heaven or Hell] Settings: ...`, and names each value it could not use.
+text editor, change a value and save: the mod reads the file every 5 seconds, so the game uses it without a restart.
+Turning a part off (`Enable`, `EnemyOneShot`) gives your attack and damage taken back to the game's at once.
+`UE4SS.log` shows the settings in use in the line `[Heaven or Hell] Settings: ...`, and names each value it could not
+use.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -56,12 +58,16 @@ text editor, change a value, save, and start the game again. `UE4SS.log` shows t
 
 ## Compatibility
 
-- Game version: Release (Steam build 26266538) (`CL-301524_JKS-17219`).
-- Tested with UE4SS `v3.0.1-1183-gcdbc0b66`.
-- Works with Witch Time (the same triggers; the window is real time, and Witch Time's slow world makes it easier to
-  land a hit in it). Less Damage Taken has no effect next to it while `EnemyOneShot` is on.
+- Game version: Steam build 26367565 (`CL-302256_JKS-17280`).
+- Tested with UE4SS `v4.0.0`.
+- Works with [Witch Time](https://github.com/KintaroModding/phantombladezero_witchtime) (the same triggers; the window
+  is real time, and Witch Time's slow world makes it easier to land a hit in it).
+- [Easier Parry and Dodge](https://github.com/KintaroModding/phantombladezero_easierparryanddodge) widens the timed
+  parry and dodge windows, so the kill window opens more often.
+- A mod that lowers the damage you take has no effect while `EnemyOneShot` is on.
 - The mod changes your character's attack and damage-taken values while it runs and never touches their base
-  values; the game puts its own values back after you remove the mod.
+  values; it gives the game's values back when you turn a part off, and the game puts its own values back after you
+  remove the mod.
 
 ## Known issues
 
