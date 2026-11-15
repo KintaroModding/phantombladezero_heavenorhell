@@ -19,7 +19,7 @@ It is a UE4SS script; it changes no game file. The window and the damage are set
 
 ## Screenshots
 
-![Heaven or Hell](docs/cover.png)
+![Heaven or Hell](docs/cover.webp)
 
 ## How to install
 
